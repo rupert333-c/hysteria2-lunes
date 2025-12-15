@@ -1,90 +1,104 @@
 #!/usr/bin/env bash
-# Hysteria2 稳定优先一键部署（Lunes Host 专用）
-# 密码通过环境变量 AUTH_PASSWORD 传入
+# -*- coding: utf-8 -*-
+# Hysteria2 稳定 & 安全部署脚本（基于原始可用版本）
 
-set -euo pipefail
+set -e
 
-# ===== 校验密码 =====
+# ====== 安全：必须通过环境变量传入密码 ======
 if [ -z "${AUTH_PASSWORD:-}" ]; then
-  echo "❌ 未设置 AUTH_PASSWORD"
-  echo "用法：AUTH_PASSWORD=你的密码 bash install.sh 3078"
-  exit 1
+    echo "❌ 未设置 AUTH_PASSWORD"
+    echo "👉 用法：AUTH_PASSWORD=你的密码 bash hy2.sh 端口"
+    exit 1
 fi
 
+# ---------- 默认配置 ----------
 HYSTERIA_VERSION="v2.6.5"
-SERVER_PORT="${1:-443}"
+DEFAULT_PORT=22222
+CERT_FILE="cert.pem"
+KEY_FILE="key.pem"
 SNI="www.bing.com"
+ALPN="h3"
+# ------------------------------
 
 BASE_DIR="$HOME/hysteria"
-BIN_PATH="$BASE_DIR/hysteria"
-CONF_FILE="$BASE_DIR/server.yaml"
-CERT_FILE="$BASE_DIR/cert.pem"
-KEY_FILE="$BASE_DIR/key.pem"
-
 mkdir -p "$BASE_DIR"
 cd "$BASE_DIR"
 
-echo "===================================="
-echo " Hysteria2 部署（Lunes 专用）"
-echo " 端口: ${SERVER_PORT}"
-echo " 安装目录: ${BASE_DIR}"
-echo "===================================="
+echo "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
+echo "Hysteria2 稳定 & 安全部署（Lunes 适配）"
+echo "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
 
-# ===== 架构 =====
-case "$(uname -m)" in
-  x86_64|amd64) ARCH="amd64" ;;
-  aarch64|arm64) ARCH="arm64" ;;
-  *) echo "❌ 不支持的架构"; exit 1 ;;
-esac
+# ---------- 获取端口 ----------
+if [[ $# -ge 1 && -n "${1:-}" ]]; then
+    SERVER_PORT="$1"
+else
+    SERVER_PORT="$DEFAULT_PORT"
+fi
 
-# ===== 下载 =====
+echo "端口: $SERVER_PORT"
+
+# ---------- 检测架构 ----------
+arch_name() {
+    local machine
+    machine=$(uname -m | tr '[:upper:]' '[:lower:]')
+    if [[ "$machine" == *"arm64"* ]] || [[ "$machine" == *"aarch64"* ]]; then
+        echo "arm64"
+    elif [[ "$machine" == *"x86_64"* ]] || [[ "$machine" == *"amd64"* ]]; then
+        echo "amd64"
+    else
+        echo ""
+    fi
+}
+
+ARCH=$(arch_name)
+if [ -z "$ARCH" ]; then
+    echo "❌ 无法识别 CPU 架构: $(uname -m)"
+    exit 1
+fi
+
+BIN_PATH="${BASE_DIR}/hysteria"
+
+# ---------- 下载二进制（单文件，稳定） ----------
 if [ ! -f "$BIN_PATH" ]; then
-  curl -L --retry 3 -o hysteria.tar.gz \
-    "https://github.com/apernet/hysteria/releases/download/app/${HYSTERIA_VERSION}/hysteria-linux-${ARCH}.tar.gz"
-  tar -xzf hysteria.tar.gz
-  mv hysteria-linux-${ARCH} hysteria
-  chmod +x hysteria
-  rm -f hysteria.tar.gz
+    URL="https://github.com/apernet/hysteria/releases/download/app/${HYSTERIA_VERSION}/hysteria-linux-${ARCH}"
+    echo "下载: $URL"
+    curl -L --retry 3 --connect-timeout 30 -o "$BIN_PATH" "$URL"
+    chmod +x "$BIN_PATH"
 fi
 
-# ===== 证书 =====
-if [ ! -f "$CERT_FILE" ]; then
-  openssl req -x509 -nodes -newkey ec \
-    -pkeyopt ec_paramgen_curve:prime256v1 \
-    -days 3650 \
-    -keyout "$KEY_FILE" \
-    -out "$CERT_FILE" \
-    -subj "/CN=${SNI}"
+# ---------- 生成证书 ----------
+if [ ! -f "$CERT_FILE" ] || [ ! -f "$KEY_FILE" ]; then
+    openssl req -x509 -nodes -newkey ec \
+        -pkeyopt ec_paramgen_curve:prime256v1 \
+        -days 3650 \
+        -keyout "$KEY_FILE" \
+        -out "$CERT_FILE" \
+        -subj "/CN=${SNI}"
 fi
 
-# ===== 配置 =====
-cat > "$CONF_FILE" <<EOF
+# ---------- 写配置 ----------
+cat > server.yaml <<EOF
 listen: ":${SERVER_PORT}"
 tls:
-  cert: "${CERT_FILE}"
-  key: "${KEY_FILE}"
+  cert: "${BASE_DIR}/${CERT_FILE}"
+  key: "${BASE_DIR}/${KEY_FILE}"
   alpn:
-    - h3
-    - h3-29
+    - "${ALPN}"
 auth:
   type: password
   password: "${AUTH_PASSWORD}"
-bandwidth:
-  up: "50mbps"
-  down: "50mbps"
 EOF
 
-# ===== 启动（前台提示 + 后台运行）=====
-pkill -f "hysteria.*server" 2>/dev/null || true
-nohup "$BIN_PATH" server -c "$CONF_FILE" >/dev/null 2>&1 &
+# ---------- 获取 IP ----------
+SERVER_IP=$(curl -s https://api.ipify.org || echo "YOUR_SERVER_IP")
 
-# ===== 获取 IP 并打印节点 =====
-IP=$(curl -s https://api.ipify.org || hostname -I | awk '{print $1}')
+# ---------- 打印节点（一定可见） ----------
+echo ""
+echo "================= 节 点 ================="
+echo "hysteria2://${AUTH_PASSWORD}@${SERVER_IP}:${SERVER_PORT}?sni=${SNI}&alpn=${ALPN}&insecure=1#Hy2-Lunes"
+echo "========================================="
+echo ""
 
-echo ""
-echo "✅ 部署完成（Lunes）"
-echo ""
-echo "📌 v2rayN 节点（请立即复制）："
-echo ""
-echo "hysteria2://${AUTH_PASSWORD}@${IP}:${SERVER_PORT}?sni=${SNI}&alpn=h3,h3-29&insecure=1#Hy2-Lunes"
-echo ""
+# ---------- 启动 ----------
+echo "启动 Hysteria2..."
+exec "$BIN_PATH" server -c server.yaml
